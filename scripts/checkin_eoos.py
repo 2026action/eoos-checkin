@@ -113,7 +113,14 @@ def main():
             login_btn.click()
 
             log("   ⏳ 等待登录完成...")
-            page.wait_for_url("**/dashboard**", timeout=15000)
+            # 等待导航离开登录页或直接访问dashboard验证
+            try:
+                page.wait_for_url("**/dashboard**", timeout=10000)
+            except:
+                # 如果没自动跳转，手动导航
+                pass
+            # 访问dashboard验证登录
+            page.goto(f"{BASE_URL}/dashboard", wait_until="networkidle", timeout=15000)
             log("   ✅ 登录成功!")
 
         # ===== 检查签到状态 =====
