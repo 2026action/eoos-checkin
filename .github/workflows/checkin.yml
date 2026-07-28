@@ -1,0 +1,67 @@
+# EOOS.TOP 每日自动签到 (带Token持久化)
+# 每天 UTC 00:00 (北京时间 08:00) 执行
+# 首次运行会登录并保存token到GitHub Variable, 后续复用免登录
+#
+# 需要设置 Secrets:
+#   EOOS_USERNAME - 用户名
+#   EOOS_PASSWORD - 密码
+#   GH_PAT        - GitHub Personal Access Token (用于更新token变量, 需repo权限)
+#
+# 需要设置 Variables:
+#   EOOS_TOKEN    - 登录token (脚本自动维护, 首次无需手动设置)
+
+name: EOOS Check-in
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 每天 UTC 00:00 = 北京时间 08:00
+  workflow_dispatch:       # 手动触发
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium
+
+      - name: Run check-in
+        id: checkin
+        env:
+          EOOS_USERNAME: ${{ secrets.EOOS_USERNAME }}
+          EOOS_PASSWORD: ${{ secrets.EOOS_PASSWORD }}
+          EOOS_COOKIE: ${{ vars.EOOS_TOKEN }}
+        run: |
+          python scripts/checkin_eoos.py 2>&1 | tee /tmp/checkin_output.txt
+
+      - name: Update token variable (if new token generated)
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          NEW_TOKEN=$(grep -oP '__NEW_TOKEN__=\K.*' /tmp/checkin_output.txt || echo "")
+          if [ -n "$NEW_TOKEN" ]; then
+            echo "🔄 更新token变量..."
+            # URL编码
+            ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$NEW_TOKEN'''))")
+            # 调用GitHub API更新变量
+            curl -s -X PATCH \
+              "https://api.github.com/repos/${{ github.repository }}/actions/variables/EOOS_TOKEN" \
+              -H "Authorization: Bearer $GH_PAT" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d "{\"name\":\"EOOS_TOKEN\",\"value\":\"$NEW_TOKEN\"}" \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print('✅ 更新成功' if 'name' in d else '❌ 更新失败: '+d.get('message',''))"
+          else
+            echo "ℹ️ 无需更新token"
+          fi
