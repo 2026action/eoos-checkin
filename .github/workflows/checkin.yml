@@ -52,16 +52,18 @@ jobs:
           NEW_TOKEN=$(grep -oP '__NEW_TOKEN__=\K.*' /tmp/checkin_output.txt || echo "")
           if [ -n "$NEW_TOKEN" ]; then
             echo "🔄 更新token变量..."
-            # URL编码
-            ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$NEW_TOKEN'''))")
-            # 调用GitHub API更新变量
-            curl -s -X PATCH \
+            # 直接调用GitHub API更新变量，204=成功
+            HTTP_CODE=$(curl -s -w "%{http_code}" -o /dev/null -X PATCH \
               "https://api.github.com/repos/${{ github.repository }}/actions/variables/EOOS_TOKEN" \
               -H "Authorization: Bearer $GH_PAT" \
               -H "Accept: application/vnd.github+json" \
               -H "Content-Type: application/json" \
-              -d "{\"name\":\"EOOS_TOKEN\",\"value\":\"$NEW_TOKEN\"}" \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print('✅ 更新成功' if 'name' in d else '❌ 更新失败: '+d.get('message',''))"
+              -d "{\"name\":\"EOOS_TOKEN\",\"value\":\"$NEW_TOKEN\"}")
+            if [ "$HTTP_CODE" = "204" ]; then
+              echo "✅ Token已更新"
+            else
+              echo "❌ 更新失败 (HTTP $HTTP_CODE)"
+            fi
           else
             echo "ℹ️ 无需更新token"
           fi
