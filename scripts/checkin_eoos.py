@@ -150,74 +150,112 @@ def main():
             browser.close()
             return {"status": "already_checked_in", "reward": reward, "token": new_token}
 
-        # ===== 点击签到 =====
-        log("🎯 点击签到按钮...")
-        checkin_clicked = False
-        selectors = [
-            "button:has-text('立即签到')",
-            "button:has-text('签到')",
-            "text=立即签到",
-            "text=今日签到",
-            "[class*='checkin']",
-            "[class*='sign']",
-        ]
+        # ===== 尝试签到 (最多 2 轮: 首轮失败刷新后重试1次) =====
+        SUCCESS_KW = ["今日已签到", "签到完成", "签到成功", "已签到",
+                      "明日再来", "明天再来", "签到已完成", "打卡成功"]
+        FAIL_KW = ["验证失败", "签到失败"]
+        MAX_ATTEMPTS = 2
+        WAIT_SECONDS = 180  # 单轮等待上限(cap.js PoW 挑战可能较慢)
 
-        for selector in selectors:
+        def do_checkin(attempt):
+            """执行一轮点击签到 + 轮询确认. 返回 (checked_in, reward)."""
+            log(f"🎯 [第{attempt}轮] 点击签到按钮...")
+            checkin_clicked = False
+            selectors = [
+                "button:has-text('立即签到')",
+                "button:has-text('签到')",
+                "text=立即签到",
+                "text=今日签到",
+                "[class*='checkin']",
+                "[class*='sign']",
+            ]
+            for selector in selectors:
+                try:
+                    btn = page.locator(selector).first
+                    if btn.is_visible(timeout=2000):
+                        log(f"   🔍 找到按钮: {selector}")
+                        btn.click()
+                        checkin_clicked = True
+                        log("   ✅ 已点击签到按钮")
+                        break
+                except:
+                    continue
+            if not checkin_clicked:
+                try:
+                    btn = page.get_by_text("立即签到", exact=True).first
+                    if btn.is_visible():
+                        btn.click()
+                        checkin_clicked = True
+                        log("   ✅ 已点击签到按钮(get_by_text)")
+                except:
+                    pass
+            if not checkin_clicked:
+                log("   ❌ 未找到签到按钮")
+                return None, "?"  # None 表示无按钮(可能已签到或页面异常)
+
+            log("🧩 等待人机验证完成 (cap.js PoW 挑战, 最长 %ds)..." % WAIT_SECONDS)
+            for i in range(WAIT_SECONDS):
+                page.wait_for_timeout(1000)
+                try:
+                    page_text = page.inner_text("body")
+                except:
+                    page_text = ""
+                if not page_text:
+                    continue
+                if any(k in page_text for k in SUCCESS_KW):
+                    amounts = re.findall(r'[+-]?\d+\.\d+', page_text)
+                    reward = amounts[0] if amounts else "?"
+                    log(f"   ✅ 签到完成! ({i+1}s) 奖励: {reward} RCoin")
+                    return True, reward
+                if any(k in page_text for k in FAIL_KW):
+                    log(f"   ❌ 页面提示验证/签到失败 (第{i+1}s)")
+                    return False, "?"
+                if i % 15 == 0 and i > 0:
+                    log(f"   ⏳ 等待中... ({i+1}s)")
+            log(f"   ⌛ 第{attempt}轮等待 {WAIT_SECONDS}s 超时未确认")
+            return False, "?"
+
+        def dump_debug(tag):
+            """失败时保存截图+HTML到当前目录, 供 workflow 上传 artifact 诊断."""
             try:
-                btn = page.locator(selector).first
-                if btn.is_visible(timeout=2000):
-                    log(f"   🔍 找到按钮: {selector}")
-                    btn.click()
-                    checkin_clicked = True
-                    log("   ✅ 已点击签到按钮")
-                    break
-            except:
-                continue
-
-        if not checkin_clicked:
-            try:
-                btn = page.get_by_text("立即签到", exact=True).first
-                if btn.is_visible():
-                    btn.click()
-                    checkin_clicked = True
-                    log("   ✅ 已点击签到按钮(get_by_text)")
-            except:
-                pass
-
-        if not checkin_clicked:
-            log("   ❌ 未找到签到按钮")
-            browser.close()
-            return {"status": "error", "message": "no checkin button found"}
-
-        # ===== 等待cap.js验证 =====
-        log("🧩 等待人机验证完成...")
-        log("   (cap.js会自动解决PoW挑战, 等待中)")
+                page.screenshot(path=f"debug_{tag}.png", full_page=True)
+                html = page.content()
+                with open(f"debug_{tag}.html", "w", encoding="utf-8") as f:
+                    f.write(html)
+                log(f"   📸 已保存诊断文件 debug_{tag}.png / .html")
+            except Exception as e:
+                log(f"   ⚠️ 保存诊断文件失败: {e}")
 
         checked_in = False
         reward = "?"
-        for i in range(120):
-            page.wait_for_timeout(1000)
-            try:
-                page_text = page.inner_text("body")
-            except:
-                page_text = ""
-
-            if not page_text:
-                continue
-
-            if "今日已签到" in page_text or "签到完成" in page_text or "签到成功" in page_text:
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            ci, reward = do_checkin(attempt)
+            if ci is True:
                 checked_in = True
-                amounts = re.findall(r'[+-]?\d+\.\d+', page_text)
-                reward = amounts[0] if amounts else "?"
-                log(f"   ✅ 签到完成! ({i+1}s) 奖励: {reward} RCoin")
                 break
-
-            if "验证失败" in page_text or "签到失败" in page_text:
-                log(f"   ❌ 验证失败 (第{i+1}s)")
-                break
-
-            if i % 10 == 0 and i > 0:
-                log(f"   ⏳ 等待中... ({i+1}s)")
+            if ci is None:
+                # 没找到签到按钮: 复检是否其实已签到
+                try:
+                    page_text = page.inner_text("body")
+                except:
+                    page_text = ""
+                if any(k in page_text for k in SUCCESS_KW):
+                    amounts = re.findall(r'[+-]?\d+\.\d+', page_text)
+                    reward = amounts[0] if amounts else "?"
+                    log(f"   ✅ 复检发现今日已签到! 奖励: {reward} RCoin")
+                    checked_in = True
+                    break
+                dump_debug(f"no_button_attempt{attempt}")
+            else:
+                dump_debug(f"timeout_attempt{attempt}")
+            # 还有重试机会 → 刷新页面重来
+            if attempt < MAX_ATTEMPTS:
+                log(f"🔄 第{attempt}轮未成功, 刷新页面重试...")
+                try:
+                    page.goto(f"{BASE_URL}/dashboard", wait_until="networkidle", timeout=20000)
+                    page.wait_for_timeout(3000)
+                except Exception as e:
+                    log(f"   ⚠️ 刷新失败: {e}")
 
         # ===== 提取token供下次使用 =====
         new_token = None
@@ -237,16 +275,21 @@ def main():
             log(f"🎉 签到成功! 获得 {reward} RCoin")
             return {"status": "success", "reward": reward, "token": new_token}
         else:
-            log("❌ 签到失败或超时")
+            log(f"❌ 签到失败或超时 (已尝试 {MAX_ATTEMPTS} 轮)")
             return {"status": "timeout", "message": "check-in not confirmed within timeout"}
 
 if __name__ == "__main__":
+    import sys
     result = main()
     print(f"\n{'='*50}")
     print(f"状态: {result.get('status')}")
     if 'reward' in result and result['reward']:
         print(f"奖励: {result['reward']} RCoin")
-    # 输出token供GitHub Action捕获
+    # 输出token供GitHub Action捕获 (必须在 exit 前打印, 保证 workflow 能抓到)
     if result.get('token'):
         print(f"__NEW_TOKEN__={result['token']}")
     print(f"{'='*50}")
+    # 只有 success 才返回 0; 失败/超时/异常返回 1 → 让 workflow step 真实失败, TG 正确报 ❌
+    if result.get("status") != "success":
+        print("__CHECKIN_FAILED__ (exit 1)")
+        sys.exit(1)

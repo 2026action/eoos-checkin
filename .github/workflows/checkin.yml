@@ -52,6 +52,20 @@ jobs:
         run: |
           set -o pipefail
           python scripts/checkin_eoos.py 2>&1 | tee /tmp/checkin_output.txt
+          RC=${PIPESTATUS[0]}
+          echo "签到脚本退出码: $RC"
+          exit $RC
+
+      - name: Upload debug artifacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkin-debug-${{ github.run_id }}
+          path: |
+            debug_*.png
+            debug_*.html
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Update token variable (if new token generated)
         if: always()
