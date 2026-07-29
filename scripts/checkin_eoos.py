@@ -193,9 +193,43 @@ def main():
                 log("   ❌ 未找到签到按钮")
                 return None, "?"  # None 表示无按钮(可能已签到或页面异常)
 
+            # ===== 触发 cap.js 人机验证 =====
+            # cap.js (@cap.js/widget) 是 click-to-start 的 PoW 组件:
+            # 必须点击 <cap-widget> 本体才开始算 PoW, 算完把 token 写入
+            # <input name="cap-token">, 前端监听 'solve' 事件后自动提交签到.
+            # 旧逻辑从不点 widget → 永远卡 loading → 必然超时(根因).
+            page.wait_for_timeout(1500)  # 等模态框+widget 挂载
+            try:
+                # 点击 cap-widget 本体触发 solve (widget 内部会渲染可点击区域)
+                wc = page.locator("cap-widget").first
+                if wc.count() > 0 and wc.is_visible(timeout=3000):
+                    log("   🧩 找到 cap-widget, 点击触发 PoW 验证...")
+                    try:
+                        wc.click(timeout=3000)
+                    except Exception:
+                        # widget 内容在 shadow DOM, 直接点坐标中心兜底
+                        wc.click(timeout=3000, force=True)
+                    log("   ⏳ 已触发, 等待 PoW 计算并写入 cap-token...")
+                else:
+                    log("   ⚠️ 未找到可见 cap-widget, 可能页面结构变化")
+            except Exception as e:
+                log(f"   ⚠️ 触发 cap-widget 异常: {e}")
+
             log("🧩 等待人机验证完成 (cap.js PoW 挑战, 最长 %ds)..." % WAIT_SECONDS)
+            token_seen = False
             for i in range(WAIT_SECONDS):
                 page.wait_for_timeout(1000)
+                # 检测 cap-token 是否已写入(PoW 完成的确切信号)
+                if not token_seen:
+                    try:
+                        tok = page.eval_on_selector(
+                            "cap-widget input[name='cap-token']",
+                            "el => el && el.value") or ""
+                    except Exception:
+                        tok = ""
+                    if tok:
+                        token_seen = True
+                        log(f"   🎫 cap-token 已生成 ({i+1}s, len={len(tok)}), 等待前端提交...")
                 try:
                     page_text = page.inner_text("body")
                 except:
