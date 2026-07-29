@@ -14,8 +14,11 @@ import json
 import os
 from playwright.sync_api import sync_playwright
 
-USERNAME = os.environ.get("EOOS_USERNAME", "niubi1705")
-PASSWORD = os.environ.get("EOOS_PASSWORD", "zxc9696")
+USERNAME = os.environ.get("EOOS_USERNAME")
+PASSWORD = os.environ.get("EOOS_PASSWORD")
+if not USERNAME or not PASSWORD:
+    print("❌ 缺少环境变量 EOOS_USERNAME / EOOS_PASSWORD", file=sys.stderr)
+    sys.exit(1)
 BASE_URL = "https://eoos.top"
 TIMEOUT = 90_000
 
@@ -209,7 +212,7 @@ def main():
                 log(f"   ✅ 签到完成! ({i+1}s) 奖励: {reward} RCoin")
                 break
 
-            if "验证失败" in page_text or "失败" in page_text:
+            if "验证失败" in page_text or "签到失败" in page_text:
                 log(f"   ❌ 验证失败 (第{i+1}s)")
                 break
 

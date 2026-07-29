@@ -17,6 +17,11 @@ on:
     - cron: '0 0 * * *'   # 每天 UTC 00:00 = 北京时间 08:00
   workflow_dispatch:       # 手动触发
 
+# 防止定时+手动并发执行
+concurrency:
+  group: eoos-checkin
+  cancel-in-progress: false
+
 jobs:
   checkin:
     runs-on: ubuntu-latest
@@ -49,20 +54,25 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          NEW_TOKEN=$(grep -oP '__NEW_TOKEN__=\K.*' /tmp/checkin_output.txt || echo "")
+          # 取最后一次出现的 __NEW_TOKEN__= 行，避免多次打印取错
+          NEW_TOKEN=$(grep -oP '__NEW_TOKEN__=\K.*' /tmp/checkin_output.txt | tail -n 1 || echo "")
           if [ -n "$NEW_TOKEN" ]; then
+            # 掩码防止后续步骤/日志泄漏
+            echo "::add-mask::$NEW_TOKEN"
             echo "🔄 更新token变量..."
-            # 直接调用GitHub API更新变量，204=成功
-            HTTP_CODE=$(curl -s -w "%{http_code}" -o /dev/null -X PATCH \
+            # 使用 --data-urlencode 风格构造 JSON，避免特殊字符破坏
+            PAYLOAD=$(python3 -c "import json,os;print(json.dumps({'name':'EOOS_TOKEN','value':os.environ['NT']}))" )
+            HTTP_CODE=$(NT="$NEW_TOKEN" curl -s -w "%{http_code}" -o /dev/null -X PATCH \
               "https://api.github.com/repos/${{ github.repository }}/actions/variables/EOOS_TOKEN" \
               -H "Authorization: Bearer $GH_PAT" \
               -H "Accept: application/vnd.github+json" \
               -H "Content-Type: application/json" \
-              -d "{\"name\":\"EOOS_TOKEN\",\"value\":\"$NEW_TOKEN\"}")
+              -d "$PAYLOAD")
             if [ "$HTTP_CODE" = "204" ]; then
               echo "✅ Token已更新"
             else
               echo "❌ 更新失败 (HTTP $HTTP_CODE)"
+              exit 1
             fi
           else
             echo "ℹ️ 无需更新token"
