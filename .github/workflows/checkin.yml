@@ -108,24 +108,9 @@ jobs:
           # 北京时间
           BJ_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S CST')
 
-          # 构造消息 (HTML 模式)
-          MSG=$(python3 <<PYEOF
-import os, html
-lines = [
-    f"{os.environ['EMOJI']} <b>{html.escape(os.environ['TITLE'])}</b>",
-    f"⏰ {html.escape(os.environ['BJ_TIME'])}",
-    f"🎯 触发: {html.escape(os.environ['EVENT_NAME'])}",
-]
-status_line = os.environ.get('STATUS_LINE','').strip()
-reward_line = os.environ.get('REWARD_LINE','').strip()
-if status_line:
-    lines.append(f"📊 状态: <code>{html.escape(status_line)}</code>")
-if reward_line:
-    lines.append(f"💰 奖励: <b>{html.escape(reward_line)}</b>")
-lines.append(f'🔗 <a href="{os.environ["RUN_URL"]}">查看运行详情</a>')
-print("\n".join(lines))
-PYEOF
-)
+          # 构造消息 (HTML 模式, 由 scripts/build_tg_message.py 生成)
+          export EMOJI TITLE BJ_TIME EVENT_NAME STATUS_LINE REWARD_LINE RUN_URL
+          MSG=$(python3 scripts/build_tg_message.py)
 
           curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TG_CHAT_ID}" \
@@ -150,19 +135,7 @@ PYEOF
                 "https://api.github.com/repos/$REPO/actions/runs?per_page=100" > /tmp/runs.json
 
           # 用 python 挑出该 workflow 下、除当前 run 外、按时间倒序、保留最新 1 条 (加上当前正在跑的这条 = 共 2 条)
-          IDS=$(CUR="$CUR_RUN" WF="$WF_NAME" python3 <<'PYEOF'
-import json, os
-with open('/tmp/runs.json') as f:
-    data = json.load(f)
-cur = os.environ['CUR']
-wf  = os.environ['WF']
-runs = [r for r in data.get('workflow_runs', []) if r.get('name') == wf and str(r['id']) != cur]
-runs.sort(key=lambda r: r['created_at'], reverse=True)
-# 保留最新 1 条 (与当前 run 合计 2 条), 其余全删
-for r in runs[1:]:
-    print(r['id'])
-PYEOF
-)
+          IDS=$(CUR="$CUR_RUN" WF="$WF_NAME" KEEP=1 python3 scripts/cleanup_old_runs.py)
 
           if [ -z "$IDS" ]; then
             echo "ℹ️ 无需清理"
