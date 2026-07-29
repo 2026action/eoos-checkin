@@ -1,11 +1,11 @@
-# EOOS.TOP 每日自动签到 (带Token持久化)
-# 每天 UTC 00:00 (北京时间 08:00) 执行
-# 首次运行会登录并保存token到GitHub Variable, 后续复用免登录
+# EOOS.TOP 每日自动签到 (带Token持久化 + TG通知 + 日志自动清理)
 #
 # 需要设置 Secrets:
 #   EOOS_USERNAME - 用户名
 #   EOOS_PASSWORD - 密码
-#   GH_PAT        - GitHub Personal Access Token (用于更新token变量, 需repo权限)
+#   GH_PAT        - GitHub PAT (repo + workflow 权限, 用于更新 Variable / 清理 run 日志)
+#   TG_BOT_TOKEN  - Telegram Bot Token (可选, 未设置则不发通知)
+#   TG_CHAT_ID    - Telegram Chat ID   (可选, 未设置则不发通知)
 #
 # 需要设置 Variables:
 #   EOOS_TOKEN    - 登录token (脚本自动维护, 首次无需手动设置)
@@ -20,7 +20,6 @@ on:
     - cron: '17 3 * * *'   # 北京 11:17 兜底2
   workflow_dispatch:       # 手动触发
 
-# 防止定时+手动并发执行
 concurrency:
   group: eoos-checkin
   cancel-in-progress: false
@@ -51,20 +50,19 @@ jobs:
           EOOS_PASSWORD: ${{ secrets.EOOS_PASSWORD }}
           EOOS_COOKIE: ${{ vars.EOOS_TOKEN }}
         run: |
+          set -o pipefail
           python scripts/checkin_eoos.py 2>&1 | tee /tmp/checkin_output.txt
 
       - name: Update token variable (if new token generated)
+        if: always()
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          # 取最后一次出现的 __NEW_TOKEN__= 行，避免多次打印取错
-          NEW_TOKEN=$(grep -oP '__NEW_TOKEN__=\K.*' /tmp/checkin_output.txt | tail -n 1 || echo "")
+          NEW_TOKEN=$(grep -oP '__NEW_TOKEN__=\K.*' /tmp/checkin_output.txt 2>/dev/null | tail -n 1 || echo "")
           if [ -n "$NEW_TOKEN" ]; then
-            # 掩码防止后续步骤/日志泄漏
             echo "::add-mask::$NEW_TOKEN"
             echo "🔄 更新token变量..."
-            # 使用 --data-urlencode 风格构造 JSON，避免特殊字符破坏
-            PAYLOAD=$(python3 -c "import json,os;print(json.dumps({'name':'EOOS_TOKEN','value':os.environ['NT']}))" )
+            PAYLOAD=$(NT="$NEW_TOKEN" python3 -c "import json,os;print(json.dumps({'name':'EOOS_TOKEN','value':os.environ['NT']}))")
             HTTP_CODE=$(NT="$NEW_TOKEN" curl -s -w "%{http_code}" -o /dev/null -X PATCH \
               "https://api.github.com/repos/${{ github.repository }}/actions/variables/EOOS_TOKEN" \
               -H "Authorization: Bearer $GH_PAT" \
@@ -79,4 +77,102 @@ jobs:
             fi
           else
             echo "ℹ️ 无需更新token"
+          fi
+
+      - name: Notify Telegram
+        if: always()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:   ${{ secrets.TG_CHAT_ID }}
+          JOB_STATUS:   ${{ job.status }}
+          RUN_URL:      ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVENT_NAME:   ${{ github.event_name }}
+        run: |
+          if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+            echo "ℹ️ 未配置 TG_BOT_TOKEN/TG_CHAT_ID, 跳过通知"
+            exit 0
+          fi
+
+          # 从脚本输出提取关键信息
+          STATUS_LINE=$(grep -oP '状态: \K.*' /tmp/checkin_output.txt 2>/dev/null | tail -n 1 || echo "")
+          REWARD_LINE=$(grep -oP '奖励: \K.*' /tmp/checkin_output.txt 2>/dev/null | tail -n 1 || echo "")
+
+          if [ "$JOB_STATUS" = "success" ]; then
+            EMOJI="✅"
+            TITLE="EOOS 签到成功"
+          else
+            EMOJI="❌"
+            TITLE="EOOS 签到失败"
+          fi
+
+          # 北京时间
+          BJ_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S CST')
+
+          # 构造消息 (HTML 模式)
+          MSG=$(python3 <<PYEOF
+import os, html
+lines = [
+    f"{os.environ['EMOJI']} <b>{html.escape(os.environ['TITLE'])}</b>",
+    f"⏰ {html.escape(os.environ['BJ_TIME'])}",
+    f"🎯 触发: {html.escape(os.environ['EVENT_NAME'])}",
+]
+status_line = os.environ.get('STATUS_LINE','').strip()
+reward_line = os.environ.get('REWARD_LINE','').strip()
+if status_line:
+    lines.append(f"📊 状态: <code>{html.escape(status_line)}</code>")
+if reward_line:
+    lines.append(f"💰 奖励: <b>{html.escape(reward_line)}</b>")
+lines.append(f'🔗 <a href="{os.environ["RUN_URL"]}">查看运行详情</a>')
+print("\n".join(lines))
+PYEOF
+)
+
+          curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TG_CHAT_ID}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" \
+            --data-urlencode "text=${MSG}" \
+            -o /tmp/tg_resp.json -w "HTTP %{http_code}\n"
+          cat /tmp/tg_resp.json | python3 -c "import sys,json;d=json.load(sys.stdin);print('TG ok=',d.get('ok'),'desc=',d.get('description',''))" || true
+
+      - name: Cleanup old workflow runs (keep latest 2)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+          WF_NAME: ${{ github.workflow }}
+          CUR_RUN: ${{ github.run_id }}
+        run: |
+          echo "🧹 清理旧运行记录, 只保留最近 2 条..."
+          # 拉取当前 workflow 的所有 run (最多 100 条足够)
+          curl -s -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/actions/runs?per_page=100" > /tmp/runs.json
+
+          # 用 python 挑出该 workflow 下、除当前 run 外、按时间倒序、保留最新 1 条 (加上当前正在跑的这条 = 共 2 条)
+          IDS=$(CUR="$CUR_RUN" WF="$WF_NAME" python3 <<'PYEOF'
+import json, os
+with open('/tmp/runs.json') as f:
+    data = json.load(f)
+cur = os.environ['CUR']
+wf  = os.environ['WF']
+runs = [r for r in data.get('workflow_runs', []) if r.get('name') == wf and str(r['id']) != cur]
+runs.sort(key=lambda r: r['created_at'], reverse=True)
+# 保留最新 1 条 (与当前 run 合计 2 条), 其余全删
+for r in runs[1:]:
+    print(r['id'])
+PYEOF
+)
+
+          if [ -z "$IDS" ]; then
+            echo "ℹ️ 无需清理"
+          else
+            echo "$IDS" | while read rid; do
+              [ -z "$rid" ] && continue
+              CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/actions/runs/$rid")
+              echo "  删除 run $rid -> HTTP $CODE"
+            done
           fi
